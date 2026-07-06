@@ -9,10 +9,6 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 
-# Colab model output (large; don't commit the trained weights)
-takemeter-model/
-*.safetensors
-checkpoint-*/
 
 # OS
 .DS_Store
