@@ -4,12 +4,14 @@ TeaGuard Provenance API is a backend trust and safety system for anonymous datin
 
 The system does not determine whether a claim is legally true or false. Instead, it identifies reviews that may need additional context, privacy protection, or human review.
 
+This project is an implementation of the "Provenance Guard" assignment brief, adapted from a general creative-content platform to a dating-review platform. In addition to the required AI-authorship attribution, it also screens for privacy risk and defamation risk, since those matter at least as much as AI authorship on this kind of platform. See `planning.md` for the full pre-implementation spec this was built from.
+
 ---
 
 ## Features
 
 * `POST /submit`: submit a text review for analysis
-* Multi-signal detection pipeline
+* Multi-signal detection pipeline (3 signals - see Detection Signals below)
 * Confidence scoring with uncertainty
 * Transparency labels for AI-generated, human/low-risk, and uncertain content
 * Privacy-risk and defamation-risk labels
@@ -25,7 +27,7 @@ The system does not determine whether a claim is legally true or false. Instead,
 | Component             | Tool                             |
 | --------------------- | -------------------------------- |
 | API framework         | Flask                            |
-| LLM classifier        | Groq / Llama                     |
+| LLM classifier        | Groq / Llama (`llama-3.3-70b-versatile`) |
 | Rule-based detector   | Python regex and keyword rules   |
 | AI-writing heuristic  | Pure Python stylometric analysis |
 | Storage               | SQLite                           |
@@ -38,7 +40,7 @@ The system does not determine whether a claim is legally true or false. Instead,
 
 ```bash
 git clone YOUR_REPO_URL
-cd teaguard-provenance-api
+cd ai201-project4-provenance-guard
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -57,15 +59,6 @@ GROQ_API_KEY=your_key_here
 ```
 
 Do not commit `.env`.
-
-Example `requirements.txt`:
-
-```text
-flask>=3.0.0
-flask-limiter>=3.5.0
-groq==0.15.0
-python-dotenv==1.0.1
-```
 
 Run the app:
 
@@ -86,6 +79,8 @@ Expected response:
   "status": "ok"
 }
 ```
+
+If `GROQ_API_KEY` is not set (or the Groq call fails for any reason), the LLM signal automatically falls back to a conservative offline heuristic (see `signals/llm_classifier.py`) so the rest of the pipeline still runs end-to-end. Every audit-log entry records which path produced the LLM score (`llm_scores` will reflect fallback behavior when a real key isn't present), but for real usage a valid `GROQ_API_KEY` is required for accurate results.
 
 ---
 
@@ -110,25 +105,25 @@ curl -s -X POST http://localhost:5000/submit \
   }' | python -m json.tool
 ```
 
-Example response:
+Actual response (captured against the live Groq-backed system):
 
 ```json
 {
-  "content_id": "content_abc123",
+  "content_id": "content_b8c6095b9f93",
   "creator_id": "test-user-1",
   "attribution": "uncertain",
-  "confidence": 0.86,
+  "confidence": 0.8175,
   "overall_risk": "high",
   "status": "under_review",
   "labels": [
     {
       "type": "privacy_risk",
-      "confidence": 0.74,
+      "confidence": 0.8175,
       "action": "hold_for_review"
     },
     {
       "type": "defamation_risk",
-      "confidence": 0.86,
+      "confidence": 0.81,
       "action": "needs_human_review"
     }
   ],
@@ -152,18 +147,26 @@ Example request:
 curl -s -X POST http://localhost:5000/appeal \
   -H "Content-Type: application/json" \
   -d '{
-    "content_id": "content_abc123",
-    "creator_reasoning": "I wrote this review based on my own experience and did not intend to expose private information."
+    "content_id": "content_2d1d1058003b",
+    "creator_reasoning": "I wrote this from personal experience and want a human reviewer to consider the context."
   }' | python -m json.tool
 ```
 
-Example response:
+Actual response:
 
 ```json
 {
-  "content_id": "content_abc123",
+  "content_id": "content_2d1d1058003b",
   "status": "under_review",
   "message": "Your appeal has been received and logged for review."
+}
+```
+
+Appealing a `content_id` that does not exist returns a `404`:
+
+```json
+{
+  "error": "No content found with content_id 'content_doesnotexist'"
 }
 ```
 
@@ -183,56 +186,54 @@ Example request:
 curl -s http://localhost:5000/log | python -m json.tool
 ```
 
-Example response:
+Actual response (trimmed to the relevant submission + appeal pair; the running system logs every request):
 
 ```json
 {
   "entries": [
     {
       "event_type": "submission",
-      "content_id": "content_001",
-      "creator_id": "test-user-1",
-      "timestamp": "2026-07-05T21:00:00Z",
+      "content_id": "content_228361dadd33",
+      "creator_id": "evidence-1",
+      "timestamp": "2026-07-06T06:43:03.858Z",
       "attribution": "likely_human",
-      "confidence": 0.28,
-      "privacy_risk_score": 0.12,
-      "defamation_risk_score": 0.18,
-      "ai_generated_score": 0.28,
+      "confidence": 0.156,
+      "privacy_risk_score": 0.0,
+      "defamation_risk_score": 0.0,
+      "ai_generated_score": 0.156,
+      "llm_scores": { "ai_generated": 0.2, "privacy_risk": 0.0, "defamation_risk": 0.0 },
+      "rule_scores": { "privacy_risk": 0.0, "defamation_risk": 0.0 },
+      "stylometric_ai_score": 0.09,
       "overall_risk": "low",
       "recommended_action": "allow",
       "status": "classified",
-      "signals_used": [
-        "llm_classifier",
-        "rule_based_detector",
-        "stylometric_ai_heuristic"
-      ],
+      "signals_used": ["llm_classifier", "rule_based_detector", "stylometric_ai_heuristic"],
       "appeal_filed": false
     },
     {
       "event_type": "submission",
-      "content_id": "content_002",
-      "creator_id": "test-user-2",
-      "timestamp": "2026-07-05T21:01:00Z",
+      "content_id": "content_2d1d1058003b",
+      "creator_id": "evidence-3",
+      "timestamp": "2026-07-06T06:43:04.824Z",
       "attribution": "uncertain",
-      "confidence": 0.91,
-      "privacy_risk_score": 0.91,
-      "defamation_risk_score": 0.32,
-      "ai_generated_score": 0.44,
+      "confidence": 0.8475,
+      "privacy_risk_score": 0.09,
+      "defamation_risk_score": 0.8475,
+      "ai_generated_score": 0.492,
+      "llm_scores": { "ai_generated": 0.7, "privacy_risk": 0.2, "defamation_risk": 0.9 },
+      "rule_scores": { "privacy_risk": 0.0, "defamation_risk": 0.75 },
+      "stylometric_ai_score": 0.18,
       "overall_risk": "high",
-      "recommended_action": "hold_for_review",
+      "recommended_action": "needs_human_review",
       "status": "under_review",
-      "signals_used": [
-        "llm_classifier",
-        "rule_based_detector",
-        "stylometric_ai_heuristic"
-      ],
+      "signals_used": ["llm_classifier", "rule_based_detector", "stylometric_ai_heuristic"],
       "appeal_filed": false
     },
     {
       "event_type": "appeal",
-      "content_id": "content_002",
-      "creator_id": "test-user-2",
-      "timestamp": "2026-07-05T21:02:00Z",
+      "content_id": "content_2d1d1058003b",
+      "creator_id": "evidence-3",
+      "timestamp": "2026-07-06T06:43:53.841Z",
       "previous_status": "under_review",
       "new_status": "under_review",
       "creator_reasoning": "I wrote this from personal experience and want a human reviewer to consider the context."
@@ -245,7 +246,7 @@ Example response:
 
 ## Architecture
 
-A submitted review enters through `POST /submit`. The API validates the request, preprocesses the text, and runs three detection signals: an LLM classifier, a rule-based detector, and a stylometric AI-writing heuristic. The confidence scorer combines the signals into privacy, defamation, and AI-generated scores. The label generator returns a plain-language transparency label, and the full decision is stored in the audit log.
+A submitted review enters through `POST /submit`. The API validates the request, then runs three detection signals against the raw text: an LLM classifier (Groq), a rule-based detector, and a stylometric AI-writing heuristic. The confidence scorer combines the three signals' outputs into three separate scores - `privacy_risk_score`, `defamation_risk_score`, `ai_generated_score` - plus a top-line `confidence`. The label generator maps that decision to one of six exact transparency-label strings, and the full decision is written to both a `decisions` record (for later appeal lookups) and an append-only audit log.
 
 ```text
 Client Platform
@@ -255,18 +256,12 @@ Client Platform
 Request Validator
     |
     v
-Text Preprocessor
-    |
-    +-----------------------------+
-    |                             |
-    v                             v
-LLM Risk Classifier        Rule-Based Detector
-    |                             |
-    v                             v
-    +-------------+---------------+
-                  |
-                  v
-       Stylometric AI-Writing Signal
+    +-----------------------------+-----------------------------+
+    |                             |                             |
+    v                             v                             v
+LLM Risk Classifier         Rule-Based Detector         Stylometric AI-Writing Signal
+    |                             |                             |
+    +-----------------------------+-----------------------------+
                   |
                   v
           Confidence Scorer
@@ -275,10 +270,10 @@ LLM Risk Classifier        Rule-Based Detector
        Transparency Label Generator
                   |
                   v
-       SQLite Audit Log
+     SQLite: decisions + audit_log
                   |
                   v
-       JSON Response
+          JSON Response
 ```
 
 Appeal flow:
@@ -288,7 +283,7 @@ Creator
     |
     | POST /appeal
     v
-Find Original Decision
+Find Original Decision (by content_id)
     |
     v
 Update Status to under_review
@@ -297,7 +292,7 @@ Update Status to under_review
 Store Appeal Reasoning
     |
     v
-Write Audit Log Entry
+Write Audit Log Entry (linked to original content_id)
     |
     v
 Return Confirmation
@@ -307,187 +302,150 @@ Return Confirmation
 
 ## Detection Signals
 
-TeaGuard uses three signals.
+TeaGuard uses **three** signals - one more than the required minimum of two, implementing the "Ensemble Detection" stretch feature.
 
-### 1. LLM Classifier
+### 1. LLM Classifier (Groq, `llama-3.3-70b-versatile`)
 
-The LLM classifier analyzes the meaning of the review and returns scores for:
+**What it measures:** meaning. The LLM is asked to assess, in one call, whether the text reads as AI-written, whether it exposes identifying information, and whether it makes a serious unverifiable accusation.
 
-* AI-generated likelihood
-* Privacy risk
-* Defamation risk
-* Severe attack risk
-* Need for human review
+**Why it was chosen:** it can catch things with no fixed surface form. `"Let's just say the police know him well."` implies a serious accusation without using any of the rule-based detector's literal keywords - only a signal that understands meaning can catch that.
 
-This signal is useful because it can detect indirect meaning.
-
-Example:
-
-```text
-Let’s just say the police know him well.
-```
-
-A keyword detector might miss this, but an LLM may recognize that it implies a serious accusation.
-
-Limitation: the LLM can be inconsistent and should not be treated as a factual or legal authority.
-
----
+**What it misses:** consistency. The same input can score differently across calls, and it is not a factual or legal authority - a high `defamation_risk_score` means "this reads like an unverifiable serious accusation," not "this accusation is false."
 
 ### 2. Rule-Based Detector
 
-The rule-based detector uses regex and keyword rules to detect explicit risks.
+**What it measures:** explicit surface patterns - phone numbers, emails, street addresses, "works at X" / "attends X" phrasing, and a fixed keyword list for serious accusations (criminal, abuser, assault, stalker, STD, etc.).
 
-Privacy patterns include:
+**Why it was chosen:** it is precise and cheap on anything with a fixed surface form, and it doesn't depend on an external API being available - it's the signal that keeps working if Groq is down.
 
-* Phone numbers
-* Email addresses
-* Street addresses
-* Social media handles
-* Workplace references
-* School references
-
-Defamation-risk keywords include:
-
-* criminal
-* abuser
-* assault
-* stalker
-* scammer
-* STD
-* drug dealer
-* violent
-* dangerous
-* cheater
-
-This signal is useful because explicit patterns like phone numbers are often easier to detect with rules.
-
-Limitation: rule-based detection can miss indirect language and may create false positives.
-
----
+**What it misses:** anything indirect. `"He is the only bartender at the rooftop bar on 57th Street."` identifies a specific person without matching any regex pattern in this detector.
 
 ### 3. Stylometric AI-Writing Heuristic
 
-The stylometric signal estimates whether a review looks AI-generated or template-like.
+**What it measures:** structural writing properties, independent of meaning - sentence-length variability (coefficient of variation, not raw variance - see AI Usage below for why), vocabulary diversity, word repetition, count of generic/hedging phrases ("furthermore", "it is important to note"), and count of first-person/casual markers (contractions, "i", "we", question marks).
 
-It checks:
+**Why it was chosen:** it is the signal most likely to *disagree* with the LLM, which is informative. It doesn't know what the text is about, so it can flag AI-like structure even when the content itself seems benign, or vice versa.
 
-* Sentence length variance
-* Type-token ratio
-* Repetition ratio
-* Generic phrase count
-* First-person detail count
-
-Limitation: very short reviews and non-native English writing are difficult to score fairly.
+**What it misses:** short text (fewer than 12 words returns a neutral 0.4, since there isn't enough text to compute stable statistics) and formal, correct writing from non-native English speakers, which shares the same structural properties (uniform sentence length, low use of casual contractions) as AI-generated text for reasons that have nothing to do with authorship. This is TeaGuard's most important documented limitation - see Known Limitations.
 
 ---
 
 ## Confidence Scoring
 
-TeaGuard calculates separate scores for each category.
+TeaGuard calculates three separate scores instead of one blended "risk" number, because a review can be privacy-risky without being AI-generated, and a human reviewer needs to see *which* concern was flagged.
 
-### Privacy Risk Score
-
-```text
-privacy_risk_score =
-0.45 * llm_privacy_score
-+ 0.55 * rule_privacy_score
-```
-
-Privacy risk relies more heavily on rule-based detection because personally identifying information often has recognizable patterns.
-
-### Defamation Risk Score
+### Formulas
 
 ```text
-defamation_risk_score =
-0.65 * llm_defamation_score
-+ 0.35 * rule_defamation_score
+privacy_risk_score     = 0.45 * llm_privacy_score     + 0.55 * rule_privacy_score
+defamation_risk_score  = 0.65 * llm_defamation_score  + 0.35 * rule_defamation_score
+ai_generated_score     = 0.60 * llm_ai_score          + 0.40 * stylometric_ai_score
+
+confidence = max(privacy_risk_score, defamation_risk_score, ai_generated_score)
 ```
 
-Defamation risk relies more heavily on the LLM because serious accusations often depend on meaning and context.
+Privacy risk leans more on the rule-based detector because identifying information usually has a recognizable surface pattern. Defamation risk leans more on the LLM because serious accusations depend on meaning, not just keywords. AI-generated leans more on the LLM because it captures semantic/stylistic coherence holistically, with stylometry as a structural check.
 
-### AI-Generated Score
+`confidence` takes the **maximum** of the three category scores rather than an average, deliberately: the strongest individual concern is the one a human reviewer needs to see, and averaging it against two low, irrelevant scores would dilute a real signal.
 
-```text
-ai_generated_score =
-0.60 * llm_ai_score
-+ 0.40 * stylometric_ai_score
-```
-
-AI-generated detection combines semantic judgment with writing-style analysis.
-
-### Main Confidence Score
-
-```text
-confidence = max(
-  privacy_risk_score,
-  defamation_risk_score,
-  ai_generated_score
-)
-```
-
-The main confidence score reflects the strongest signal that affected the final decision.
-
----
-
-## Thresholds
+### Thresholds
 
 | Score Range | Risk Level |
 | ----------- | ---------- |
 | `>= 0.80`   | high       |
-| `0.55–0.79` | medium     |
+| `0.55-0.79` | medium     |
 | `< 0.55`    | low        |
 
 AI attribution:
 
-| Condition                                            | Attribution    |
-| ---------------------------------------------------- | -------------- |
-| `ai_generated_score >= 0.75`                         | `likely_ai`    |
-| `ai_generated_score <= 0.35` and no high-risk labels | `likely_human` |
-| otherwise                                            | `uncertain`    |
+| Condition                                             | Attribution    |
+| ------------------------------------------------------ | -------------- |
+| `ai_generated_score >= 0.75`                            | `likely_ai`    |
+| `ai_generated_score <= 0.35` and no high-risk labels    | `likely_human` |
+| otherwise                                               | `uncertain`    |
 
-Recommended actions:
+This is not a binary flip at 0.5 - there is a dead zone between 0.35 and 0.75 that always resolves to `uncertain`, and `likely_human` additionally requires that neither privacy nor defamation risk is `high`, so a serious accusation never gets a clean "likely human, all good" verdict just because it wasn't AI-like.
 
-| Condition                                         | Action               |
-| ------------------------------------------------- | -------------------- |
-| High privacy risk                                 | `hold_for_review`    |
-| High defamation risk                              | `needs_human_review` |
-| Medium risk                                       | `show_warning`       |
-| Low risk                                          | `allow`              |
-| Uncertain AI attribution with no high safety risk | `allow_with_context` |
+### How the scoring was validated
+
+The scoring function was tested against the four calibration inputs specified in the project guide (clearly AI-generated, clearly human/casual, a borderline formal-human case, and a borderline lightly-edited-AI case), run against the live Groq-backed system:
+
+| Input | confidence | overall_risk | attribution |
+|---|---|---|---|
+| Clearly AI-generated paragraph | 0.812 | high | likely_ai |
+| Clearly human, casual review | 0.12 | low | likely_human |
+| Borderline formal human writing | 0.612 | medium | uncertain |
+| Borderline lightly-edited AI text | 0.64 | medium | uncertain |
+
+Both borderline cases correctly landed in the `uncertain` middle band instead of being forced into a confident verdict, which is the behavior the thresholds were designed to produce.
+
+### Two examples with noticeably different confidence
+
+**High-confidence case** - a review with an explicit phone number and workplace reference:
+
+> "He works at ABC Bank on 57th Street and his phone number is 212-555-0198."
+
+```json
+{
+  "attribution": "uncertain",
+  "confidence": 0.955,
+  "overall_risk": "high",
+  "status": "under_review",
+  "transparency_label": "This review may include personally identifying information and has been held for review."
+}
+```
+
+**Lower-confidence case** - an ordinary, low-risk review:
+
+> "I went on two dates with him. He was polite, but we did not really click. I would not go out again, but nothing unsafe happened."
+
+```json
+{
+  "attribution": "likely_human",
+  "confidence": 0.156,
+  "overall_risk": "low",
+  "status": "classified",
+  "transparency_label": "No high-risk trust or safety signals were detected. This review appears safe for standard posting."
+}
+```
+
+`0.955` versus `0.156` is a substantial, meaningful spread produced by the same formula on genuinely different inputs - not a constant.
 
 ---
 
 ## Transparency Labels
 
-The system returns exact user-facing label text.
+The system returns exact user-facing label text. Every label is worded as a *possibility* ("may include", "could not confidently classify"), never a verdict, because a false positive here - telling a real person their own writing looks AI-generated, or flagging a fair account as defamatory - is worse than a false negative. That asymmetry is a deliberate design choice.
 
 ### High-Confidence AI
 
-> “This review may include AI-generated or AI-assisted writing. This label is based on automated signals and may not be definitive.”
+> "This review may include AI-generated or AI-assisted writing. This label is based on automated signals and may not be definitive."
 
 ### High-Confidence Human / Low-Risk
 
-> “No high-risk trust or safety signals were detected. This review appears safe for standard posting.”
+> "No high-risk trust or safety signals were detected. This review appears safe for standard posting."
 
 ### Uncertain
 
-> “Our system could not confidently classify this review. It may require additional context or human review before broader visibility.”
+> "Our system could not confidently classify this review. It may require additional context or human review before broader visibility."
 
 ### Privacy Risk
 
-> “This review may include personally identifying information and has been held for review.”
+> "This review may include personally identifying information and has been held for review."
 
 ### Defamation Risk
 
-> “This review includes a serious personal claim that may require additional context or evidence before publication.”
+> "This review includes a serious personal claim that may require additional context or evidence before publication."
 
 ### Combined High Risk
 
-> “This review includes serious personal claims or identifying details and may require additional context before publication.”
+> "This review includes serious personal claims or identifying details and may require additional context before publication."
 
 ---
 
 ## Example Results
+
+All results below were captured against the running system with a live `GROQ_API_KEY` configured.
 
 ### Low-Risk Review
 
@@ -497,19 +455,17 @@ Input:
 I went on two dates with him. He was polite, but we did not really click. I would not go out again, but nothing unsafe happened.
 ```
 
-Example result:
+Result:
 
 ```json
 {
   "attribution": "likely_human",
-  "confidence": 0.28,
+  "confidence": 0.156,
   "overall_risk": "low",
   "status": "classified",
   "transparency_label": "No high-risk trust or safety signals were detected. This review appears safe for standard posting."
 }
 ```
-
----
 
 ### Privacy-Risk Review
 
@@ -519,19 +475,17 @@ Input:
 He works at ABC Bank on 57th Street and his phone number is 212-555-0198.
 ```
 
-Example result:
+Result:
 
 ```json
 {
   "attribution": "uncertain",
-  "confidence": 0.91,
+  "confidence": 0.955,
   "overall_risk": "high",
   "status": "under_review",
   "transparency_label": "This review may include personally identifying information and has been held for review."
 }
 ```
-
----
 
 ### Defamation-Risk Review
 
@@ -541,19 +495,37 @@ Input:
 He is definitely a criminal and abuses every woman he dates. Everyone should avoid him.
 ```
 
-Example result:
+Result:
 
 ```json
 {
   "attribution": "uncertain",
-  "confidence": 0.88,
+  "confidence": 0.8475,
   "overall_risk": "high",
   "status": "under_review",
   "transparency_label": "This review includes a serious personal claim that may require additional context or evidence before publication."
 }
 ```
 
----
+### Combined High-Risk Review
+
+Input:
+
+```text
+He works at ABC Bank on 57th Street and I heard he has an STD. Everyone should avoid him.
+```
+
+Result:
+
+```json
+{
+  "attribution": "uncertain",
+  "confidence": 0.8175,
+  "overall_risk": "high",
+  "status": "under_review",
+  "transparency_label": "This review includes serious personal claims or identifying details and may require additional context before publication."
+}
+```
 
 ### AI-Like Review
 
@@ -563,17 +535,19 @@ Input:
 This individual demonstrates numerous red flags that should be carefully considered before engaging in a romantic relationship. It is important to prioritize personal safety and evaluate behavioral patterns objectively.
 ```
 
-Example result:
+Result:
 
 ```json
 {
   "attribution": "likely_ai",
-  "confidence": 0.78,
-  "overall_risk": "medium",
-  "status": "classified",
+  "confidence": 0.84,
+  "overall_risk": "high",
+  "status": "under_review",
   "transparency_label": "This review may include AI-generated or AI-assisted writing. This label is based on automated signals and may not be definitive."
 }
 ```
+
+Note: this review's `recommended_action` came back as `allow` even though `overall_risk` is `high`, because privacy and defamation risk are both low here - the high risk level is driven entirely by `ai_generated_score`. `overall_risk`/`status` and `recommended_action` are answering two different questions (see Spec Reflection below): "does this need a human to look at it" versus "should it be blocked outright." A confidently AI-flagged review still goes to `under_review` so a moderator can decide on disclosure, even with nothing else wrong with it.
 
 ---
 
@@ -589,9 +563,9 @@ Configured limit:
 
 Reasoning:
 
-A normal creator or small platform integration should not need more than 10 review submissions per minute during testing. The per-minute limit helps prevent scripts from flooding the endpoint. The daily limit prevents repeated abuse while still allowing enough requests for local development.
+A normal creator or small platform integration should not need more than 10 review submissions per minute during testing or real usage - nobody posts reviews that fast by hand. The per-minute limit is the one that actually stops a script from flooding the endpoint. The daily limit is a looser backstop against sustained abuse across a whole day, set high enough (100) that it never gets in the way of legitimate local development or testing, while still bounding worst-case load from a single client.
 
-Rate limit test:
+Rate limit test (12 rapid requests against the live server):
 
 ```bash
 for i in $(seq 1 12); do
@@ -601,7 +575,7 @@ for i in $(seq 1 12); do
 done
 ```
 
-Expected result:
+Actual result:
 
 ```text
 200
@@ -617,6 +591,8 @@ Expected result:
 429
 429
 ```
+
+The first 10 requests succeed and the 11th/12th are correctly rejected.
 
 ---
 
@@ -631,13 +607,13 @@ The appeal must include:
 
 When an appeal is submitted:
 
-1. The system finds the original decision.
+1. The system finds the original decision by `content_id` (returns `404` if it doesn't exist).
 2. The content status is updated to `under_review`.
-3. The creator’s reasoning is stored.
-4. The appeal is logged alongside the original decision.
+3. The creator's reasoning is stored.
+4. The appeal is logged alongside the original decision, linked by `content_id`.
 5. The API returns a confirmation response.
 
-The system does not automatically reclassify the content after an appeal. The appeal creates a human-review path and preserves an audit trail.
+The system does not automatically reclassify the content after an appeal - it does not re-run the detection pipeline. This creates a human-review path and preserves a full audit trail, and it avoids an obvious gaming vector (submit, get flagged, appeal, get auto-cleared by the same code that flagged it).
 
 ---
 
@@ -647,91 +623,41 @@ The system does not automatically reclassify the content after an appeal. The ap
 
 TeaGuard does not determine whether a serious claim is true. It only detects that the review contains a serious claim that may require additional context or human review.
 
+### Formal, correct English from a non-native speaker looks AI-like
+
+This is the single most specific and consequential limitation, tied directly to the stylometric signal: consistent sentence length and low use of casual contractions/first-person hedging are exactly the structural properties the heuristic associates with AI writing (see `signals/stylometric.py`), but they are also just what careful, formal human writing looks like. In testing, the borderline formal-human calibration text ("The relationship between monetary policy and asset price inflation...") scored `confidence: 0.612` - solidly in the `uncertain` band - specifically because it has low sentence-length variability and no casual markers, not because it was AI-written. The appeal workflow exists in large part because of this exact failure mode.
+
 ### Indirect privacy leakage is difficult
 
-A review can identify someone without including a phone number or address.
-
-Example:
-
-```text
-He is the only bartender at the rooftop bar on 57th Street.
-```
-
-This may identify a real person, but a simple rule-based detector may not catch it.
+A review can identify someone without including a phone number or address. `"He is the only bartender at the rooftop bar on 57th Street."` would likely score low on the rule-based detector, since none of its regex patterns match, and would identify a real person only if the LLM signal happens to catch the implication.
 
 ### Short reviews are hard to classify
 
-Stylometric analysis is unreliable on very short reviews.
-
-Example:
-
-```text
-He lied. Stay away.
-```
-
-The system should avoid high-confidence AI attribution for very short text.
-
-### Non-native English may be misclassified
-
-Formal or generic writing from a non-native English speaker may look AI-generated. This is why the AI label uses cautious language and the system includes an appeal workflow.
+Stylometric analysis is unreliable on very short reviews - `"He lied. Stay away."` (4 words) falls below the 12-word threshold in `signals/stylometric.py` and returns a neutral 0.4 rather than a confident verdict in either direction. This is a deliberate design choice (better to abstain than to guess), but it does mean short, high-signal reviews don't get full credit for being obviously human.
 
 ---
 
 ## Spec Reflection
 
-Writing the specification before implementation helped define the system’s boundaries. The most important design decision was separating `privacy_risk`, `defamation_risk`, and `ai_generated` into different scores instead of returning one generic moderation score.
+**How the spec helped:** deciding the exact confidence formula and thresholds in `planning.md` *before* writing `scoring.py` caught a design flaw early: an initial draft would have averaged the three category scores together into one number. Writing out "what does 0.6 mean to a user" first made it obvious that averaging would let a severe defamation risk get diluted by two irrelevant low scores, which is exactly the false-negative failure mode the hints section warns against. The final design takes the max instead, and that decision traces directly back to the planning question, not to a code review after the fact.
 
-The implementation may diverge slightly from the original thresholds after testing. For example, if the rule-based detector over-flags harmless workplace mentions, the privacy-risk threshold may need adjustment.
+**Where the implementation diverged from the spec:** `planning.md` treats `overall_risk` and `recommended_action` as if they'd always point the same direction. In practice they can diverge - see the AI-Like Review example above, where `overall_risk: "high"` but `recommended_action: "allow"`, because the high risk level is driven by `ai_generated_score` rather than by privacy or defamation risk. This wasn't anticipated in planning because the spec's risk-level table was written with privacy/defamation in mind; once AI-generated content shares the same threshold scale, a confidently-AI review with no other issues legitimately produces this combination. If deploying this for real, I would either give `ai_generated_score` its own separate "requires disclosure review" status distinct from `overall_risk`, or exclude it from the `confidence`/`overall_risk` calculation entirely and treat AI-authorship as an orthogonal label rather than a risk level.
 
 ---
 
 ## AI Usage
 
-AI tools were used to support development, but the system design and final decisions were reviewed manually.
+AI tools were used to support development, but the system design and final decisions were reviewed and verified manually against `planning.md` at every milestone.
 
-### Instance 1: Flask API skeleton
+### Instance 1: Flask API skeleton and first signal (Milestone 3)
 
-I directed the AI tool to generate a Flask app skeleton with:
+I directed the AI tool to generate a Flask app skeleton with a `POST /submit` stub and the first signal function (`classify_with_llm` in `signals/llm_classifier.py`), given the Detection Signals section of the spec and the architecture diagram. The generated Groq prompt originally asked for a single `ai_generated_score` only; I revised it to request all three scores (`ai_generated_score`, `privacy_risk_score`, `defamation_risk_score`) in one call, since the spec calls for those three categories from the start, and added the offline fallback path so the app doesn't hard-fail without a live API key.
 
-* `POST /submit`
-* `POST /appeal`
-* `GET /log`
-* SQLite setup
-* Basic request validation
+### Instance 2: Stylometric heuristic and confidence scoring (Milestone 4)
 
-I revised the output to make sure each endpoint matched the API contract and returned the required fields.
+I directed the AI tool to generate the stylometric signal and the `scoring.py` formulas from the Uncertainty Representation section of `planning.md`. The first version of the stylometric heuristic used raw sentence-length **variance** as its uniformity signal. When I ran it against the project guide's four calibration texts, the short clearly-AI-generated paragraph (only 3 sentences) produced a *higher* raw variance than the clearly-human paragraph, the opposite of what the metric was supposed to show, because raw variance scales with sentence length and the AI paragraph happened to have one much longer sentence. I revised the metric to use the coefficient of variation (std / mean) instead of raw variance, which is scale-invariant, and re-ran the calibration set to confirm the AI text now correctly showed the lowest relative variability.
 
-### Instance 2: Detection and scoring functions
+### Instance 3: Label mapping and appeal endpoint (Milestone 5)
 
-I directed the AI tool to generate:
+I directed the AI tool to generate the label-mapping function and the `POST /appeal` route from the Transparency Label Design and Appeals Workflow sections of `planning.md`. The initial appeal implementation re-ran the detection pipeline on appeal to "give the creator an updated score," which directly contradicts the spec ("Automated re-classification is not required" / avoids a gaming vector where flagging then appealing clears content automatically). I removed the re-classification call and kept the appeal endpoint to only updating status and logging the reasoning, matching the planning document.
 
-* Rule-based privacy detector
-* Rule-based defamation-risk detector
-* Stylometric AI-writing heuristic
-* Confidence scoring function
-
-I revised the scoring logic to match the planned formulas and tested it on low-risk, privacy-risk, defamation-risk, AI-like, and uncertain examples.
-
-### Instance 3: Label and appeal logic
-
-I directed the AI tool to generate label mapping logic and the appeal endpoint. I revised the labels to use cautious, non-accusatory language and verified that appeals update the status to `under_review`.
-
----
-
-## Walkthrough Video Plan
-
-The walkthrough video will show:
-
-1. The Flask server running locally.
-2. A low-risk review submitted through `POST /submit`.
-3. A privacy-risk review.
-4. A defamation-risk review.
-5. The `GET /log` output.
-6. A creator appeal through `POST /appeal`.
-7. The updated audit log showing the appeal.
-
-Short explanation:
-
-```text
-TeaGuard is a backend trust and safety API for anonymous dating-review platforms. It uses three signals: an LLM classifier, rule-based privacy and claim detection, and stylometric AI-writing heuristics. The system does not try to prove whether a claim is true. Instead, it identifies reviews that may need privacy protection, additional context, or human review. I designed the labels to communicate uncertainty and added an appeal workflow so creators have a path to contest automated classifications.
-```
